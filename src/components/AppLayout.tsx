@@ -1,4 +1,4 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   PackageOpen,
@@ -16,9 +16,12 @@ import {
   Warehouse,
   ArrowDownUp,
   Menu as MenuIcon,
+  LogOut,
+  Loader2,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,12 +34,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import {
-  Sheet,
-  SheetContent,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 type NavGroup = {
   label: string;
@@ -58,7 +56,12 @@ const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       { to: "/master-items", label: "Items", thai: "วัตถุดิบ", icon: Boxes },
       { to: "/suppliers", label: "Suppliers", thai: "ซัพพลายเออร์", icon: Truck },
-      { to: "/beginning-stock", label: "Beginning Stock", thai: "สต๊อกเริ่มต้น", icon: PackageOpen },
+      {
+        to: "/beginning-stock",
+        label: "Beginning Stock",
+        thai: "สต๊อกเริ่มต้น",
+        icon: PackageOpen,
+      },
     ],
   },
   {
@@ -97,9 +100,26 @@ const BOTTOM_NAV = [
 export function AppLayout({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { items, currentStock, settings, updateSettings, transactions } = useStore();
+  const { user, loading: authLoading, signOut } = useAuth();
+  const navigate = useNavigate();
   const [q, setQ] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   useEffect(() => setMounted(true), []);
+
+  // Guest -> /login. This gate protects every route rendered through AppLayout.
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate({ to: "/login" });
+    }
+  }, [authLoading, user, navigate]);
+
+  const handleLogout = async () => {
+    setSigningOut(true);
+    await signOut();
+    setSigningOut(false);
+    navigate({ to: "/login" });
+  };
 
   const notifications = useMemo(() => {
     if (!mounted) return { low: [], soon: [], total: 0 };
@@ -108,16 +128,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
       (t) =>
         t.expiryDate &&
         new Date(t.expiryDate).getTime() - Date.now() < 7 * 86400000 &&
-        new Date(t.expiryDate).getTime() > Date.now()
+        new Date(t.expiryDate).getTime() > Date.now(),
     );
     return { low, soon, total: low.length + soon.length };
   }, [items, transactions, currentStock, mounted]);
 
-  const toggleTheme = () =>
-    updateSettings({ theme: settings.theme === "dark" ? "light" : "dark" });
+  const toggleTheme = () => updateSettings({ theme: settings.theme === "dark" ? "light" : "dark" });
 
-  const isActive = (to: string) =>
-    pathname === to || (to !== "/" && pathname.startsWith(to));
+  const isActive = (to: string) => pathname === to || (to !== "/" && pathname.startsWith(to));
 
   const SidebarInner = (
     <div className="flex h-full flex-col">
@@ -134,7 +152,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
         )}
         <div className="flex flex-col leading-tight">
-          <span className="text-[15px] font-semibold tracking-tight">{settings.companyName || "Hana"}</span>
+          <span className="text-[15px] font-semibold tracking-tight">
+            {settings.companyName || "Hana"}
+          </span>
           <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
             Inventory Stock
           </span>
@@ -158,13 +178,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
                       "group flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-all",
                       active
                         ? "bg-primary text-primary-foreground shadow-sm"
-                        : "text-foreground/70 hover:bg-accent hover:text-accent-foreground"
+                        : "text-foreground/70 hover:bg-accent hover:text-accent-foreground",
                     )}
                   >
                     <n.icon
                       className={cn(
                         "h-4 w-4 shrink-0",
-                        active ? "" : "text-muted-foreground group-hover:text-accent-foreground"
+                        active ? "" : "text-muted-foreground group-hover:text-accent-foreground",
                       )}
                     />
                     <span className="min-w-0 flex-1 truncate">{n.label}</span>
@@ -172,7 +192,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                       <span
                         className={cn(
                           "shrink-0 text-[11px] font-normal",
-                          active ? "text-primary-foreground/80" : "text-muted-foreground/70"
+                          active ? "text-primary-foreground/80" : "text-muted-foreground/70",
                         )}
                       >
                         {n.thai}
@@ -187,6 +207,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
       </nav>
     </div>
   );
+
+  if (authLoading || !user) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -222,7 +250,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
               <div className="ml-auto flex items-center gap-1">
                 <Button variant="ghost" size="icon" onClick={toggleTheme} className="rounded-full">
-                  {settings.theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                  {settings.theme === "dark" ? (
+                    <Sun className="h-4 w-4" />
+                  ) : (
+                    <Moon className="h-4 w-4" />
+                  )}
                 </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -262,6 +294,20 @@ export function AppLayout({ children }: { children: ReactNode }) {
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleLogout}
+                  disabled={signingOut}
+                  title="Log out"
+                  className="rounded-full"
+                >
+                  {signingOut ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <LogOut className="h-4 w-4" />
+                  )}
+                </Button>
               </div>
             </div>
 
@@ -292,7 +338,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                     to={n.to}
                     className={cn(
                       "flex flex-col items-center gap-0.5 rounded-xl px-3 py-1.5 text-[10px] font-medium transition-colors",
-                      active ? "text-primary" : "text-muted-foreground"
+                      active ? "text-primary" : "text-muted-foreground",
                     )}
                   >
                     <n.icon className={cn("h-5 w-5", active && "scale-110 transition-transform")} />
@@ -319,7 +365,9 @@ function GlobalSearchResults({ q, onClose }: { q: string; onClose: () => void })
   const matchSup = suppliers
     .filter((s) => s.name.toLowerCase().includes(query) || s.code.toLowerCase().includes(query))
     .slice(0, 5);
-  const matchPur = purchases.filter((p) => p.invoiceNumber.toLowerCase().includes(query)).slice(0, 3);
+  const matchPur = purchases
+    .filter((p) => p.invoiceNumber.toLowerCase().includes(query))
+    .slice(0, 3);
   const matchUsage = transactions
     .filter((t) => t.type === "usage" && (t.remark ?? "").toLowerCase().includes(query))
     .slice(0, 3);

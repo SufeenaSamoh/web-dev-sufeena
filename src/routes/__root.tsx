@@ -13,6 +13,7 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Toaster } from "@/components/ui/sonner";
 import { StoreProvider } from "@/lib/store";
+import { AuthProvider } from "@/lib/auth";
 
 function NotFoundComponent() {
   return (
@@ -80,10 +81,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Hana Inventory Stock" },
-      { name: "description", content: "Premium inventory management for Japanese restaurant chains." },
+      {
+        name: "description",
+        content: "Premium inventory management for Japanese restaurant chains.",
+      },
       { name: "author", content: "Hana" },
       { property: "og:title", content: "Hana Inventory Stock" },
-      { property: "og:description", content: "Premium inventory management for Japanese restaurant chains." },
+      {
+        property: "og:description",
+        content: "Premium inventory management for Japanese restaurant chains.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -120,11 +127,13 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <StoreProvider>
-        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-        <Outlet />
-        <Toaster position="top-right" richColors closeButton />
-      </StoreProvider>
+      <AuthProvider>
+        <StoreProvider>
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+          <Toaster position="top-right" richColors closeButton />
+        </StoreProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }
