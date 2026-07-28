@@ -25,8 +25,13 @@ import {
   listNotifications as listNotificationsService,
   resolveNotification as resolveNotificationService,
   type AppNotification,
+  type ExpiryNotificationSummary,
   type ListNotificationsFilter,
 } from "@/services/notifications";
+import {
+  runNotificationScheduler as runNotificationSchedulerService,
+  type SchedulerResult,
+} from "@/services/notificationScheduler";
 import type {
   Branch,
   Category,
@@ -101,10 +106,12 @@ interface StoreCtx extends AppData {
     options?: ConsumeInventoryOptions,
   ) => Promise<ConsumeInventoryResult>;
   /** Expiry Notification Engine. See src/services/notifications.ts. */
-  generateExpiryNotifications: () => Promise<AppNotification[]>;
+  generateExpiryNotifications: () => Promise<ExpiryNotificationSummary>;
   listNotifications: (filter?: ListNotificationsFilter) => Promise<AppNotification[]>;
   resolveNotification: (id: string) => Promise<AppNotification>;
   dismissNotification: (id: string) => Promise<AppNotification>;
+  /** Notification Scheduler. See src/services/notificationScheduler.ts. */
+  runNotificationScheduler: () => Promise<SchedulerResult>;
 }
 
 const Ctx = createContext<StoreCtx | null>(null);
@@ -624,6 +631,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       listNotifications: listNotificationsService,
       resolveNotification: resolveNotificationService,
       dismissNotification: dismissNotificationService,
+      runNotificationScheduler: runNotificationSchedulerService,
     }),
     [data, loading, currentStock, bumpItemStock, loadAll],
   );

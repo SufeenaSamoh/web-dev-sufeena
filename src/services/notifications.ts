@@ -155,6 +155,32 @@ async function isExpiryNotificationEnabled(): Promise<boolean> {
 }
 
 /**
+ * Structured result of a generation run. `expired`/`warning`/`info` count
+ * newly created notifications by severity (critical/warning/info -- named
+ * "expired" here rather than "critical" to match the Expired + Expires
+ * Today levels, which both produce severity 'critical'). `skipped` counts
+ * lots that qualified for a notification but already had one unresolved
+ * for the same (lot, type) -- see the duplicate-check below.
+ */
+export interface ExpiryNotificationSummary {
+  created: AppNotification[];
+  generated: number;
+  skipped: number;
+  expired: number;
+  warning: number;
+  info: number;
+}
+
+const EMPTY_SUMMARY: ExpiryNotificationSummary = {
+  created: [],
+  generated: 0,
+  skipped: 0,
+  expired: 0,
+  warning: 0,
+  info: 0,
+};
+
+/**
  * Scans every consumable lot (qty_remaining > 0, status != 'expired') whose
  * item has has_expiry = true, classifies each one against today's date,
  * and inserts a public.notifications row for any lot that doesn't already
@@ -162,11 +188,12 @@ async function isExpiryNotificationEnabled(): Promise<boolean> {
  * allocation (public.fn_consume_fefo) in any way -- this only reads
  * inventory_lots/items and writes to notifications.
  *
- * Intended to be invoked periodically (e.g. from a scheduled job) rather
- * than on every page load; there is no UI wiring here by design.
+ * Intended to be invoked periodically (e.g. from
+ * src/services/notificationScheduler.ts) rather than on every page load;
+ * there is no UI wiring here by design.
  */
-export async function generateExpiryNotifications(): Promise<AppNotification[]> {
-  if (!(await isExpiryNotificationEnabled())) return [];
+export async function generateExpiryNotifications(): Promise<ExpiryNotificationSummary> {
+  if (!(await isExpiryNotificationEnabled())) return EMPTY_SUMMARY;
 
   const defaultWarningDays = await getDefaultWarningDays();
 
@@ -182,7 +209,7 @@ export async function generateExpiryNotifications(): Promise<AppNotification[]> 
   if (lotsError) throw lotsError;
 
   const lots = (lotRows ?? []) as unknown as CandidateLotRow[];
-  if (lots.length === 0) return [];
+  if (lots.length === 0) return EMPTY_SUMMARY;
 
   const today = utcMidnight(new Date().toISOString());
 
@@ -219,7 +246,7 @@ export async function generateExpiryNotifications(): Promise<AppNotification[]> 
       ),
     });
   }
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return EMPTY_SUMMARY;
 
   // Duplicate check: skip any (lot_id, type) pair that already has an
   // unresolved notification.
@@ -233,7 +260,10 @@ export async function generateExpiryNotifications(): Promise<AppNotification[]> 
 
   const existingKeys = new Set((existingRows ?? []).map((r) => `${r.lot_id}:${r.type}`));
   const toInsert = candidates.filter((c) => !existingKeys.has(`${c.lotId}:${c.type}`));
-  if (toInsert.length === 0) return [];
+  const skipped = candidates.length - toInsert.length;
+  if (toInsert.length === 0) {
+    return { ...EMPTY_SUMMARY, skipped };
+  }
 
   const nowIso = new Date().toISOString();
   const { data: inserted, error: insertError } = await supabase
@@ -253,7 +283,22 @@ export async function generateExpiryNotifications(): Promise<AppNotification[]> 
     .select();
   if (insertError) throw insertError;
 
-  return (inserted ?? []).map((r) => rowToNotification(r as NotificationRow));
+  const created = (inserted ?? []).map((r) => rowToNotification(r as NotificationRow));
+  const bySeverity = { expired: 0, warning: 0, info: 0 };
+  for (const n of created) {
+    if (n.severity === "critical") bySeverity.expired += 1;
+    else if (n.severity === "warning") bySeverity.warning += 1;
+    else bySeverity.info += 1;
+  }
+
+  return {
+    created,
+    generated: created.length,
+    skipped,
+    expired: bySeverity.expired,
+    warning: bySeverity.warning,
+    info: bySeverity.info,
+  };
 }
 
 // ---------------------------------------------------------------------------
