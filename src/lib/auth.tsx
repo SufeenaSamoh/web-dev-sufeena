@@ -1,104 +1,84 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import type { Session, User as SupabaseUser } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
+import type { User as AppUser } from "./types";
 
 interface AuthResult {
   error: string | null;
 }
 
-// NOTE: this local shape intentionally does NOT reuse the `Profile`/
-// `ProfileRole` types from ./types — those back the current
-// `public.profiles` schema (see supabase/migrations/013_profiles.sql and
-// src/services/profiles.ts), which no longer has auth_user_id/status/
-// branch_id columns. This file's own sign-in/session logic is unchanged
-// from before; only these type names were kept local so the two don't
-// collide.
-type LegacyProfileRole = "owner" | "admin" | "manager" | "staff";
-
-interface LegacyProfile {
+interface UserRow {
   id: string;
-  authUserId: string | null;
-  fullName: string;
+  name: string | null;
   email: string;
-  role: LegacyProfileRole;
-  branchId?: string;
-  status: "active" | "disabled";
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface AuthContextValue {
-  session: Session | null;
-  user: User | null;
-  /** The caller's own row in public.profiles (role/status), or null if not yet loaded/linked. */
-  profile: LegacyProfile | null;
-  /** true until the initial session check has completed */
-  loading: boolean;
-  /** true while (re)loading `profile` for the current session */
-  profileLoading: boolean;
-  signIn: (email: string, password: string) => Promise<AuthResult>;
-  signOut: () => Promise<void>;
-  refreshProfile: () => Promise<void>;
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null);
-
-interface ProfileRow {
-  id: string;
-  auth_user_id: string | null;
-  full_name: string | null;
-  email: string;
-  role: LegacyProfileRole;
+  role: AppUser["role"];
   branch_id: string | null;
-  status: "active" | "disabled";
-  created_at: string;
-  updated_at: string;
+  status: "active" | "inactive";
 }
 
-function rowToProfile(r: ProfileRow): LegacyProfile {
+function rowToAppUser(r: UserRow): AppUser {
   return {
     id: r.id,
-    authUserId: r.auth_user_id,
-    fullName: r.full_name ?? "",
+    name: r.name ?? "",
     email: r.email,
     role: r.role,
     branchId: r.branch_id ?? undefined,
     status: r.status,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
   };
 }
+
+interface AuthContextValue {
+  session: Session | null;
+  user: SupabaseUser | null;
+  /** The caller's own row in public.users (role/status), matched by email. */
+  appUser: AppUser | null;
+  /** true until the initial session check has completed */
+  loading: boolean;
+  /** true while (re)loading `appUser` for the current session */
+  appUserLoading: boolean;
+  signIn: (email: string, password: string) => Promise<AuthResult>;
+  signOut: () => Promise<void>;
+  refreshAppUser: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  const [profile, setProfile] = useState<LegacyProfile | null>(null);
-  const [profileLoading, setProfileLoading] = useState(false);
+  const [appUser, setAppUser] = useState<AppUser | null>(null);
+  const [appUserLoading, setAppUserLoading] = useState(false);
 
-  const loadProfile = async (userId: string) => {
-    setProfileLoading(true);
+  // public.users is not linked to auth.users by id, so the caller's row is
+  // looked up by email.
+  const loadAppUser = async (email: string | null | undefined) => {
+    if (!email) {
+      setAppUser(null);
+      return;
+    }
+    setAppUserLoading(true);
     try {
       const { data, error } = await supabase
-        .from("profiles")
+        .from("users")
         .select("*")
-        .eq("auth_user_id", userId)
+        .eq("email", email)
         .maybeSingle();
       if (error) throw error;
-      const next = data ? rowToProfile(data as ProfileRow) : null;
+      const next = data ? rowToAppUser(data as UserRow) : null;
 
-      // A disabled account is blocked at sign-in time too (see signIn below),
-      // but this also catches the case where an Owner/Admin disables someone
-      // who already has an open session/tab.
-      if (next?.status === "disabled") {
+      // A disabled account is blocked at sign-in time too (see signIn
+      // below), but this also catches the case where an Owner/Admin
+      // disables someone who already has an open session/tab.
+      if (next?.status === "inactive") {
         await supabase.auth.signOut();
-        setProfile(null);
+        setAppUser(null);
         return;
       }
-      setProfile(next);
+      setAppUser(next);
     } catch {
-      setProfile(null);
+      setAppUser(null);
     } finally {
-      setProfileLoading(false);
+      setAppUserLoading(false);
     }
   };
 
@@ -111,7 +91,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!active) return;
         setSession(data.session);
         setLoading(false);
-        if (data.session?.user) void loadProfile(data.session.user.id);
+        if (data.session?.user) void loadAppUser(data.session.user.email);
       })
       .catch(() => {
         if (!active) return;
@@ -123,9 +103,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(newSession);
       setLoading(false);
       if (newSession?.user) {
-        void loadProfile(newSession.user.id);
+        void loadAppUser(newSession.user.email);
       } else {
-        setProfile(null);
+        setAppUser(null);
       }
     });
 
@@ -139,13 +119,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return { error: error.message };
 
-    if (data.user) {
-      const { data: prof } = await supabase
-        .from("profiles")
+    if (data.user?.email) {
+      const { data: row } = await supabase
+        .from("users")
         .select("status")
-        .eq("auth_user_id", data.user.id)
+        .eq("email", data.user.email)
         .maybeSingle();
-      if (prof?.status === "disabled") {
+      if (row?.status === "inactive") {
         await supabase.auth.signOut();
         return { error: "This account has been disabled. Contact an administrator." };
       }
@@ -156,22 +136,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = async () => {
     await supabase.auth.signOut();
-    setProfile(null);
+    setAppUser(null);
   };
 
-  const refreshProfile = async () => {
-    if (session?.user) await loadProfile(session.user.id);
+  const refreshAppUser = async () => {
+    if (session?.user) await loadAppUser(session.user.email);
   };
 
   const value: AuthContextValue = {
     session,
     user: session?.user ?? null,
-    profile,
+    appUser,
     loading,
-    profileLoading,
+    appUserLoading,
     signIn,
     signOut,
-    refreshProfile,
+    refreshAppUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

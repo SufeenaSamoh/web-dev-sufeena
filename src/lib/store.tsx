@@ -12,6 +12,21 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import {
+  consumeInventory as consumeInventoryService,
+  getAvailableLots as getAvailableLotsService,
+  type ConsumeInventoryOptions,
+  type ConsumeInventoryResult,
+  type InventoryLot,
+} from "@/services/inventoryLots";
+import {
+  dismissNotification as dismissNotificationService,
+  generateExpiryNotifications as generateExpiryNotificationsService,
+  listNotifications as listNotificationsService,
+  resolveNotification as resolveNotificationService,
+  type AppNotification,
+  type ListNotificationsFilter,
+} from "@/services/notifications";
 import type {
   Branch,
   Category,
@@ -77,6 +92,19 @@ interface StoreCtx extends AppData {
   deleteUser: (id: string) => Promise<void>;
   updateSettings: (p: Partial<Settings>) => Promise<void>;
   reset: () => Promise<void>;
+  /** FEFO: lots for an item, earliest expiry first. See src/services/inventoryLots.ts. */
+  getAvailableLots: (itemId: string, branchId?: string) => Promise<InventoryLot[]>;
+  /** FEFO: deduct qty from the earliest-expiring lots first. See src/services/inventoryLots.ts. */
+  consumeInventory: (
+    itemId: string,
+    quantity: number,
+    options?: ConsumeInventoryOptions,
+  ) => Promise<ConsumeInventoryResult>;
+  /** Expiry Notification Engine. See src/services/notifications.ts. */
+  generateExpiryNotifications: () => Promise<AppNotification[]>;
+  listNotifications: (filter?: ListNotificationsFilter) => Promise<AppNotification[]>;
+  resolveNotification: (id: string) => Promise<AppNotification>;
+  dismissNotification: (id: string) => Promise<AppNotification>;
 }
 
 const Ctx = createContext<StoreCtx | null>(null);
@@ -590,6 +618,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       reset: async () => {
         await loadAll();
       },
+      getAvailableLots: getAvailableLotsService,
+      consumeInventory: consumeInventoryService,
+      generateExpiryNotifications: generateExpiryNotificationsService,
+      listNotifications: listNotificationsService,
+      resolveNotification: resolveNotificationService,
+      dismissNotification: dismissNotificationService,
     }),
     [data, loading, currentStock, bumpItemStock, loadAll],
   );

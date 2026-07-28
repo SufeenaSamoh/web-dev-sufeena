@@ -73,33 +73,19 @@ export interface Purchase {
   branchId: UUID;
 }
 
-export type UserRole = "admin" | "manager" | "employee";
+// User Management (Users page, roles, disable/delete) is backed by the
+// existing public.users table — no separate profiles table. Roles: Owner,
+// Admin, Manager, Staff. `status` doubles as the "disable user" flag
+// ("inactive" = disabled).
+export type UserRole = "owner" | "admin" | "manager" | "staff";
 
 export interface User {
   id: UUID;
   name: string;
   email: string;
   role: UserRole;
-  branchId: UUID;
+  branchId?: UUID;
   status: "active" | "inactive";
-}
-
-// ---------------------------------------------------------------------------
-// User Management (backed by public.profiles — see
-// supabase/migrations/013_profiles.sql). Kept distinct from the legacy
-// `User`/`UserRole` types above, which back the unrelated `public.users`
-// table still used elsewhere (e.g. Settings backup export).
-// ---------------------------------------------------------------------------
-export type ProfileRole = "owner" | "admin" | "manager" | "staff";
-
-export interface Profile {
-  /** Same uuid as the linked auth.users row. */
-  id: UUID;
-  email: string;
-  fullName: string;
-  role: ProfileRole;
-  active: boolean;
-  createdAt: string;
 }
 
 export interface Branch {
