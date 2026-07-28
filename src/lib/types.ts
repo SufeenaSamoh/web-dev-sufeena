@@ -17,6 +17,12 @@ export interface Item {
   barcode?: string;
   description?: string;
   active: boolean;
+  /** Whether this item's stock should be tracked with an expiry date. */
+  hasExpiry: boolean;
+  /** Default shelf life in days from receive date, used when has_expiry is true. */
+  shelfLifeDays?: number;
+  /** How many days before expiry a near-expiry warning should be raised. */
+  expiryWarningDays?: number;
 }
 
 export interface Supplier {
@@ -76,6 +82,24 @@ export interface User {
   role: UserRole;
   branchId: UUID;
   status: "active" | "inactive";
+}
+
+// ---------------------------------------------------------------------------
+// User Management (backed by public.profiles — see
+// supabase/migrations/013_profiles.sql). Kept distinct from the legacy
+// `User`/`UserRole` types above, which back the unrelated `public.users`
+// table still used elsewhere (e.g. Settings backup export).
+// ---------------------------------------------------------------------------
+export type ProfileRole = "owner" | "admin" | "manager" | "staff";
+
+export interface Profile {
+  /** Same uuid as the linked auth.users row. */
+  id: UUID;
+  email: string;
+  fullName: string;
+  role: ProfileRole;
+  active: boolean;
+  createdAt: string;
 }
 
 export interface Branch {

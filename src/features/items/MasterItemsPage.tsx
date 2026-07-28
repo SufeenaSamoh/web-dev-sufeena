@@ -69,6 +69,9 @@ const empty: Omit<Item, "id"> = {
   barcode: "",
   description: "",
   active: true,
+  hasExpiry: false,
+  shelfLifeDays: undefined,
+  expiryWarningDays: undefined,
 };
 
 const UNITS = ["kg", "g", "L", "ml", "pcs", "pack", "bottle", "tray", "box"];
@@ -88,7 +91,6 @@ export function MasterItemsPage() {
     currentStock,
     addItem,
     updateItem,
-    deleteItem,
     settings,
   } = useStore();
 
@@ -110,7 +112,7 @@ export function MasterItemsPage() {
 
   const avgCost = (itemId: string) => {
     const purchases = transactions.filter(
-      (t) => t.itemId === itemId && t.type === "purchase" && t.unitPrice != null
+      (t) => t.itemId === itemId && t.type === "purchase" && t.unitPrice != null,
     );
     if (!purchases.length) return 0;
     const totalQty = purchases.reduce((s, t) => s + t.quantity, 0);
@@ -161,6 +163,9 @@ export function MasterItemsPage() {
       barcode: i.barcode ?? "",
       description: i.description ?? "",
       active: i.active,
+      hasExpiry: i.hasExpiry,
+      shelfLifeDays: i.shelfLifeDays,
+      expiryWarningDays: i.expiryWarningDays,
     });
   };
 
@@ -170,10 +175,13 @@ export function MasterItemsPage() {
     if (!form.categoryId) return "Category is required";
     if (!form.supplierId) return "Supplier is required";
     if (!form.unit) return "Unit is required";
+    if (form.hasExpiry && (!form.shelfLifeDays || form.shelfLifeDays <= 0)) {
+      return "Shelf life (days) is required when expiry tracking is on";
+    }
     const dup = items.find(
       (i) =>
         i.code.toLowerCase() === form.code.trim().toLowerCase() &&
-        (!editing || i.id !== editing.id)
+        (!editing || i.id !== editing.id),
     );
     if (dup) return "Item Code must be unique";
     return null;
@@ -185,15 +193,18 @@ export function MasterItemsPage() {
       toast.error(err);
       return;
     }
+    const payload: Omit<Item, "id"> = {
+      ...form,
+      code: form.code.trim(),
+      name: form.name.trim(),
+      shelfLifeDays: form.hasExpiry ? form.shelfLifeDays : undefined,
+      expiryWarningDays: form.hasExpiry ? form.expiryWarningDays : undefined,
+    };
     if (editing) {
-      updateItem(editing.id, form);
+      await updateItem(editing.id, payload);
       toast.success("Item updated");
     } else {
-      await addItem({
-  ...form,
-  code: form.code.trim(),
-  name: form.name.trim(),
-});
+      await addItem(payload);
       if (initialStock && initialStock > 0) {
         // handled below via effect? simplest: no-op; using addItem returns void.
       }
@@ -203,10 +214,14 @@ export function MasterItemsPage() {
     setCreating(false);
   };
 
-  const confirmDelete = () => {
+  // Soft delete: items are referenced by purchase/receiving/stock-count
+  // history, so we never hard-delete a row from the Master Items screen --
+  // we deactivate it instead. Inactive items are excluded from workflows
+  // but remain visible here (Status filter) and keep their history intact.
+  const confirmDelete = async () => {
     if (!deleteId) return;
-    deleteItem(deleteId);
-    toast.success("Item deleted");
+    await updateItem(deleteId, { active: false });
+    toast.success("Item deactivated");
     setDeleteId(null);
   };
 
@@ -223,6 +238,9 @@ export function MasterItemsPage() {
       "Average Cost": Number(avgCost(i.id).toFixed(2)),
       Barcode: i.barcode ?? "",
       Description: i.description ?? "",
+      "Track Expiry": i.hasExpiry ? "Yes" : "No",
+      "Shelf Life (days)": i.shelfLifeDays ?? "",
+      "Expiry Warning (days)": i.expiryWarningDays ?? "",
       Status: i.active ? "Active" : "Inactive",
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -264,6 +282,12 @@ export function MasterItemsPage() {
         const description = String(pick(row, ["Description"]) || "").trim();
         const activeRaw = String(pick(row, ["Status", "Active"]) || "active").toLowerCase();
         const active = !["inactive", "false", "0", "no"].includes(activeRaw);
+        const hasExpiryRaw = String(pick(row, ["Track Expiry", "Has Expiry"]) || "").toLowerCase();
+        const hasExpiry = ["true", "1", "yes"].includes(hasExpiryRaw);
+        const shelfLifeRaw = pick(row, ["Shelf Life (days)", "Shelf Life", "shelf_life_days"]);
+        const shelfLifeDays = shelfLifeRaw === "" ? undefined : Number(shelfLifeRaw) || undefined;
+        const warningRaw = pick(row, ["Expiry Warning (days)", "expiry_warning_days"]);
+        const expiryWarningDays = warningRaw === "" ? undefined : Number(warningRaw) || undefined;
 
         const category = categories.find((c) => c.name.toLowerCase() === catName.toLowerCase());
         const supplier = suppliers.find((s) => s.name.toLowerCase() === supName.toLowerCase());
@@ -279,6 +303,9 @@ export function MasterItemsPage() {
           barcode,
           description,
           active,
+          hasExpiry,
+          shelfLifeDays: hasExpiry ? shelfLifeDays : undefined,
+          expiryWarningDays: hasExpiry ? expiryWarningDays : undefined,
         };
 
         if (!code) return { data, status: "error", message: "Missing Item Code" };
@@ -328,7 +355,11 @@ export function MasterItemsPage() {
                 e.target.value = "";
               }}
             />
-            <Button variant="outline" className="rounded-xl" onClick={() => fileRef.current?.click()}>
+            <Button
+              variant="outline"
+              className="rounded-xl"
+              onClick={() => fileRef.current?.click()}
+            >
               <Upload className="mr-1 h-4 w-4" /> Import Excel
             </Button>
             <Button variant="outline" className="rounded-xl" onClick={exportExcel}>
@@ -355,22 +386,54 @@ export function MasterItemsPage() {
               className="h-9 border-0 bg-transparent shadow-none focus-visible:ring-0"
             />
           </div>
-          <Select value={cat} onValueChange={(v) => { setCat(v); setPage(1); }}>
-            <SelectTrigger className="h-11 rounded-xl"><SelectValue /></SelectTrigger>
+          <Select
+            value={cat}
+            onValueChange={(v) => {
+              setCat(v);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="h-11 rounded-xl">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All categories</SelectItem>
-              {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              {categories.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
-          <Select value={sup} onValueChange={(v) => { setSup(v); setPage(1); }}>
-            <SelectTrigger className="h-11 rounded-xl"><SelectValue /></SelectTrigger>
+          <Select
+            value={sup}
+            onValueChange={(v) => {
+              setSup(v);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="h-11 rounded-xl">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All suppliers</SelectItem>
-              {suppliers.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+              {suppliers.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
-          <Select value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
-            <SelectTrigger className="h-11 rounded-xl"><SelectValue /></SelectTrigger>
+          <Select
+            value={status}
+            onValueChange={(v) => {
+              setStatus(v);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="h-11 rounded-xl">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All status</SelectItem>
               <SelectItem value="active">Active</SelectItem>
@@ -411,10 +474,14 @@ export function MasterItemsPage() {
                       {suppliers.find((s) => s.id === i.supplierId)?.name ?? "—"}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{i.unit}</TableCell>
-                    <TableCell className={`text-right tabular-nums ${low ? "text-destructive font-semibold" : ""}`}>
+                    <TableCell
+                      className={`text-right tabular-nums ${low ? "text-destructive font-semibold" : ""}`}
+                    >
                       {stock}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">{i.minStock}</TableCell>
+                    <TableCell className="text-right tabular-nums text-muted-foreground">
+                      {i.minStock}
+                    </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {formatCurrency(i.purchasePrice ?? 0, settings.currency)}
                     </TableCell>
@@ -423,19 +490,36 @@ export function MasterItemsPage() {
                     </TableCell>
                     <TableCell>
                       {i.active ? (
-                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Active</Badge>
+                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">
+                          Active
+                        </Badge>
                       ) : (
                         <Badge variant="secondary">Inactive</Badge>
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="icon" onClick={() => setHistoryItem(i)} className="rounded-lg">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setHistoryItem(i)}
+                        className="rounded-lg"
+                      >
                         <History className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => openEdit(i)} className="rounded-lg">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => openEdit(i)}
+                        className="rounded-lg"
+                      >
                         <Pencil className="h-4 w-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" onClick={() => setDeleteId(i.id)} className="rounded-lg text-destructive">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setDeleteId(i.id)}
+                        className="rounded-lg text-destructive"
+                      >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>
@@ -444,7 +528,10 @@ export function MasterItemsPage() {
               })}
               {paged.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell
+                    colSpan={11}
+                    className="py-10 text-center text-sm text-muted-foreground"
+                  >
                     No items match.
                   </TableCell>
                 </TableRow>
@@ -468,7 +555,9 @@ export function MasterItemsPage() {
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="tabular-nums">Page {pageSafe} / {totalPages}</span>
+            <span className="tabular-nums">
+              Page {pageSafe} / {totalPages}
+            </span>
             <Button
               variant="outline"
               size="icon"
@@ -500,33 +589,60 @@ export function MasterItemsPage() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Item Code *</Label>
-                <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} />
+                <Input
+                  value={form.code}
+                  onChange={(e) => setForm({ ...form, code: e.target.value })}
+                />
               </div>
               <div>
                 <Label>Barcode</Label>
-                <Input value={form.barcode ?? ""} onChange={(e) => setForm({ ...form, barcode: e.target.value })} />
+                <Input
+                  value={form.barcode ?? ""}
+                  onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                />
               </div>
             </div>
             <div>
               <Label>Item Name *</Label>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              <Input
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Category *</Label>
-                <Select value={form.categoryId} onValueChange={(v) => setForm({ ...form, categoryId: v })}>
-                  <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+                <Select
+                  value={form.categoryId}
+                  onValueChange={(v) => setForm({ ...form, categoryId: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
                   <SelectContent>
-                    {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
               <div>
                 <Label>Supplier *</Label>
-                <Select value={form.supplierId ?? ""} onValueChange={(v) => setForm({ ...form, supplierId: v })}>
-                  <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+                <Select
+                  value={form.supplierId ?? ""}
+                  onValueChange={(v) => setForm({ ...form, supplierId: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
                   <SelectContent>
-                    {suppliers.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+                    {suppliers.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -535,9 +651,15 @@ export function MasterItemsPage() {
               <div>
                 <Label>Unit *</Label>
                 <Select value={form.unit} onValueChange={(v) => setForm({ ...form, unit: v })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
-                    {UNITS.map((u) => <SelectItem key={u} value={u}>{u}</SelectItem>)}
+                    {UNITS.map((u) => (
+                      <SelectItem key={u} value={u}>
+                        {u}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -566,32 +688,97 @@ export function MasterItemsPage() {
                 rows={2}
               />
             </div>
+            <div className="rounded-xl border border-border p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="mb-0">Track Expiry</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Calculates a batch expiry date from shelf life on receive.
+                  </p>
+                </div>
+                <Switch
+                  checked={form.hasExpiry}
+                  onCheckedChange={(v) => setForm({ ...form, hasExpiry: v })}
+                />
+              </div>
+              {form.hasExpiry && (
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <Label>Shelf Life (days) *</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={form.shelfLifeDays ?? ""}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          shelfLifeDays: e.target.value === "" ? undefined : Number(e.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label>Expiry Warning (days before)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={form.expiryWarningDays ?? ""}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          expiryWarningDays:
+                            e.target.value === "" ? undefined : Number(e.target.value),
+                        })
+                      }
+                      placeholder="Uses system default"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="flex items-center justify-between rounded-xl border border-border p-3">
               <div>
                 <Label className="mb-0">Active</Label>
-                <p className="text-xs text-muted-foreground">Inactive items are hidden from workflows.</p>
+                <p className="text-xs text-muted-foreground">
+                  Inactive items are hidden from workflows.
+                </p>
               </div>
-              <Switch checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} />
+              <Switch
+                checked={form.active}
+                onCheckedChange={(v) => setForm({ ...form, active: v })}
+              />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => { setCreating(false); setEditing(null); }}>Cancel</Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setCreating(false);
+                setEditing(null);
+              }}
+            >
+              Cancel
+            </Button>
             <Button onClick={() => save()}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete confirm */}
+      {/* Delete confirm (soft delete: sets active = false) */}
       <AlertDialog open={!!deleteId} onOpenChange={(o) => !o && setDeleteId(null)}>
         <AlertDialogContent className="rounded-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this item?</AlertDialogTitle>
-            <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+            <AlertDialogDescription>
+              This deactivates the item (Status → Inactive) instead of permanently deleting it, so
+              its purchase, receiving and stock-count history stays intact. You can reactivate it
+              anytime from Edit.
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={confirmDelete}
+              onClick={() => void confirmDelete()}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
@@ -644,7 +831,9 @@ export function MasterItemsPage() {
                   <TableRow key={idx}>
                     <TableCell>
                       {r.status === "new" && (
-                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">New</Badge>
+                        <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">
+                          New
+                        </Badge>
                       )}
                       {r.status === "duplicate" && <Badge variant="secondary">Skip</Badge>}
                       {r.status === "error" && (
@@ -661,12 +850,17 @@ export function MasterItemsPage() {
                     <TableCell className="text-muted-foreground">
                       {suppliers.find((s) => s.id === r.data.supplierId)?.name ?? "—"}
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{r.message ?? ""}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {r.message ?? ""}
+                    </TableCell>
                   </TableRow>
                 ))}
                 {importRows.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
+                    <TableCell
+                      colSpan={6}
+                      className="py-8 text-center text-sm text-muted-foreground"
+                    >
                       No rows.
                     </TableCell>
                   </TableRow>
@@ -675,11 +869,10 @@ export function MasterItemsPage() {
             </Table>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setImportOpen(false)}>Cancel</Button>
-            <Button
-              onClick={confirmImport}
-              disabled={!importRows.some((r) => r.status === "new")}
-            >
+            <Button variant="ghost" onClick={() => setImportOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={confirmImport} disabled={!importRows.some((r) => r.status === "new")}>
               Import {importRows.filter((r) => r.status === "new").length} items
             </Button>
           </DialogFooter>
@@ -707,12 +900,14 @@ function HistoryDialog({
   }, [item, transactions]);
 
   const typeLabel = (t: StockTransaction["type"]) =>
-    ({
-      beginning: "Beginning Stock",
-      purchase: "Purchase",
-      usage: "Usage",
-      adjustment: "Adjustment",
-    } as const)[t] ?? t;
+    (
+      ({
+        beginning: "Beginning Stock",
+        purchase: "Purchase",
+        usage: "Usage",
+        adjustment: "Adjustment",
+      }) as const
+    )[t] ?? t;
 
   return (
     <Dialog open={!!item} onOpenChange={(o) => !o && onClose()}>
@@ -735,9 +930,7 @@ function HistoryDialog({
             <TableBody>
               {rows.map((t) => (
                 <TableRow key={t.id}>
-                  <TableCell className="text-xs">
-                    {new Date(t.date).toLocaleDateString()}
-                  </TableCell>
+                  <TableCell className="text-xs">{new Date(t.date).toLocaleDateString()}</TableCell>
                   <TableCell>
                     <Badge variant="secondary" className="capitalize">
                       {typeLabel(t.type)}
@@ -752,7 +945,7 @@ function HistoryDialog({
                     {t.quantity} {item?.unit}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {t.refId ? `#${t.refId.slice(0, 6)}` : t.remark ?? "—"}
+                    {t.refId ? `#${t.refId.slice(0, 6)}` : (t.remark ?? "—")}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {t.employee ?? "—"}
