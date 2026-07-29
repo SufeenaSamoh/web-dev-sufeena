@@ -18,14 +18,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 export function InventoryOpsPage() {
-  const {
-    items,
-    categories,
-    suppliers,
-    branches,
-    currentStock,
-    addTransaction,
-  } = useStore();
+  const { items, categories, suppliers, branches, currentStock, addTransaction } = useStore();
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(todayStr);
@@ -69,20 +62,16 @@ export function InventoryOpsPage() {
       if (next >= filtered.length) return;
       rowVirtualizer.scrollToIndex(next, { align: "center" });
       requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLInputElement>(
-          `input[data-qty-index="${next}"]`
-        );
+        const el = document.querySelector<HTMLInputElement>(`input[data-qty-index="${next}"]`);
         el?.focus();
         el?.select();
       });
     },
-    [filtered.length, rowVirtualizer]
+    [filtered.length, rowVirtualizer],
   );
 
-  const setValue = (id: string, v: string) =>
-    setValues((s) => ({ ...s, [id]: v }));
-  const setRemark = (id: string, v: string) =>
-    setRemarks((s) => ({ ...s, [id]: v }));
+  const setValue = (id: string, v: string) => setValues((s) => ({ ...s, [id]: v }));
+  const setRemark = (id: string, v: string) => setRemarks((s) => ({ ...s, [id]: v }));
 
   useEffect(() => {
     if (!branchId && branches[0]) setBranchId(branches[0].id);
@@ -110,6 +99,7 @@ export function InventoryOpsPage() {
         type: "adjustment",
         quantity: diff,
         date: new Date(date).toISOString(),
+        branchId,
         remark: `ตรวจนับ · ${branchName}${userRemark ? ` · ${userRemark}` : ""}`,
       });
       saved++;
@@ -167,11 +157,15 @@ export function InventoryOpsPage() {
           <div>
             <Label className="mb-1.5 block text-sm">หมวดหมู่ (Category)</Label>
             <Select value={cat} onValueChange={setCat}>
-              <SelectTrigger className="h-11 rounded-xl"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-11 rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">ทั้งหมด (All)</SelectItem>
                 {categories.map((c) => (
-                  <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -179,11 +173,15 @@ export function InventoryOpsPage() {
           <div>
             <Label className="mb-1.5 block text-sm">ซัพพลายเออร์ (Supplier)</Label>
             <Select value={sup} onValueChange={setSup}>
-              <SelectTrigger className="h-11 rounded-xl"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-11 rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">ทั้งหมด (All)</SelectItem>
                 {suppliers.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -251,7 +249,9 @@ export function InventoryOpsPage() {
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium">{i.name}</div>
                         {i.barcode && (
-                          <div className="truncate text-[11px] text-muted-foreground">{i.barcode}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {i.barcode}
+                          </div>
                         )}
                       </div>
                       <div className="text-right text-sm font-semibold tabular-nums">{sys}</div>
@@ -277,7 +277,7 @@ export function InventoryOpsPage() {
                                 ? "bg-emerald-500/10 text-emerald-600"
                                 : diff < 0
                                   ? "bg-destructive/10 text-destructive"
-                                  : "bg-muted text-muted-foreground"
+                                  : "bg-muted text-muted-foreground",
                           )}
                         >
                           {diff === null ? "—" : diff > 0 ? `+${diff}` : diff}
@@ -296,7 +296,9 @@ export function InventoryOpsPage() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-semibold">{i.name}</div>
-                          <div className="text-[11px] text-muted-foreground">{i.code} · {i.unit}</div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {i.code} · {i.unit}
+                          </div>
                         </div>
                         <div className="shrink-0 text-right">
                           <div className="text-[10px] uppercase text-muted-foreground">คงเหลือ</div>
@@ -324,7 +326,7 @@ export function InventoryOpsPage() {
                                 ? "bg-emerald-500/10 text-emerald-600"
                                 : diff < 0
                                   ? "bg-destructive/10 text-destructive"
-                                  : "bg-muted text-muted-foreground"
+                                  : "bg-muted text-muted-foreground",
                           )}
                         >
                           {diff === null ? "—" : diff > 0 ? `+${diff}` : diff}
