@@ -17,6 +17,12 @@ export interface Item {
   barcode?: string;
   description?: string;
   active: boolean;
+  /** Whether this item's stock should be tracked with an expiry date. */
+  hasExpiry: boolean;
+  /** Default shelf life in days from receive date, used when has_expiry is true. */
+  shelfLifeDays?: number;
+  /** How many days before expiry a near-expiry warning should be raised. */
+  expiryWarningDays?: number;
 }
 
 export interface Supplier {
@@ -41,6 +47,8 @@ export interface StockTransaction {
   unitPrice?: number;
   date: string; // ISO
   supplierId?: UUID;
+  /** transactions.branch_id (nullable — see 001_core_columns_and_balance.sql). */
+  branchId?: UUID;
   refId?: UUID;
   remark?: string;
   expiryDate?: string;
@@ -67,20 +75,37 @@ export interface Purchase {
   branchId: UUID;
 }
 
-export type UserRole = "admin" | "manager" | "employee";
+// User Management (Users page, roles, disable/delete) is backed by the
+// existing public.users table — no separate profiles table. Roles: Owner,
+// Admin, Manager, Staff. `status` doubles as the "disable user" flag
+// ("inactive" = disabled).
+export type UserRole = "owner" | "admin" | "manager" | "staff";
 
 export interface User {
   id: UUID;
   name: string;
   email: string;
   role: UserRole;
-  branchId: UUID;
+  branchId?: UUID;
   status: "active" | "inactive";
 }
 
 export interface Branch {
   id: UUID;
   name: string;
+}
+
+/**
+ * public.inventory_balance — the real per-branch, per-item stock source of
+ * truth (see supabase/migrations/001_core_columns_and_balance.sql).
+ * `items.current_stock` is a deprecated convenience value; reports must
+ * use this instead.
+ */
+export interface InventoryBalance {
+  branchId: UUID;
+  itemId: UUID;
+  quantity: number;
+  updatedAt: string;
 }
 
 export interface Settings {

@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- pre-existing Supabase row mappers below
+   read untyped `.select("*")` rows; typing every table row is a larger refactor outside the
+   scope of this change. */
 import { supabase } from "./supabase";
 import {
   createContext,
@@ -9,9 +12,30 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import {
+  consumeInventory as consumeInventoryService,
+  getAvailableLots as getAvailableLotsService,
+  type ConsumeInventoryOptions,
+  type ConsumeInventoryResult,
+  type InventoryLot,
+} from "@/services/inventoryLots";
+import {
+  dismissNotification as dismissNotificationService,
+  generateExpiryNotifications as generateExpiryNotificationsService,
+  listNotifications as listNotificationsService,
+  resolveNotification as resolveNotificationService,
+  type AppNotification,
+  type ExpiryNotificationSummary,
+  type ListNotificationsFilter,
+} from "@/services/notifications";
+import {
+  runNotificationScheduler as runNotificationSchedulerService,
+  type SchedulerResult,
+} from "@/services/notificationScheduler";
 import type {
   Branch,
   Category,
+  InventoryBalance,
   Item,
   Purchase,
   Settings,
@@ -42,6 +66,8 @@ interface AppData {
   branches: Branch[];
   transactions: StockTransaction[];
   purchases: Purchase[];
+  /** public.inventory_balance — the real per-branch stock source of truth (see 001_core_columns_and_balance.sql). */
+  inventoryBalance: InventoryBalance[];
   settings: Settings;
 }
 
@@ -53,6 +79,7 @@ const defaultData: AppData = {
   branches: [],
   transactions: [],
   purchases: [],
+  inventoryBalance: [],
   settings: defaultSettings,
 };
 
@@ -74,27 +101,46 @@ interface StoreCtx extends AppData {
   deleteUser: (id: string) => Promise<void>;
   updateSettings: (p: Partial<Settings>) => Promise<void>;
   reset: () => Promise<void>;
+  /** FEFO: lots for an item, earliest expiry first. See src/services/inventoryLots.ts. */
+  getAvailableLots: (itemId: string, branchId?: string) => Promise<InventoryLot[]>;
+  /** FEFO: deduct qty from the earliest-expiring lots first. See src/services/inventoryLots.ts. */
+  consumeInventory: (
+    itemId: string,
+    quantity: number,
+    options?: ConsumeInventoryOptions,
+  ) => Promise<ConsumeInventoryResult>;
+  /** Expiry Notification Engine. See src/services/notifications.ts. */
+  generateExpiryNotifications: () => Promise<ExpiryNotificationSummary>;
+  listNotifications: (filter?: ListNotificationsFilter) => Promise<AppNotification[]>;
+  resolveNotification: (id: string) => Promise<AppNotification>;
+  dismissNotification: (id: string) => Promise<AppNotification>;
+  /** Notification Scheduler. See src/services/notificationScheduler.ts. */
+  runNotificationScheduler: () => Promise<SchedulerResult>;
 }
 
 const Ctx = createContext<StoreCtx | null>(null);
 
 // ---------- row <-> model mappers ----------
 
-const rowToItem = (r: any): Item => ({
-  id: r.id,
-  code: r.code ?? "",
-  name: r.name ?? "",
-  categoryId: r.category_id ?? "",
-  supplierId: r.supplier_id ?? undefined,
-  unit: r.unit ?? "kg",
-  minStock: Number(r.minimum_stock ?? 0),
-  purchasePrice: Number(r.purchase_price ?? 0),
-  barcode: r.barcode ?? "",
-  description: r.description ?? "",
-  active: r.active ?? true,
-  // keep the raw current_stock alongside for currentStock()
-  ...(r.current_stock !== undefined ? { currentStock: Number(r.current_stock) } : {}),
-} as Item & { currentStock?: number });
+const rowToItem = (r: any): Item =>
+  ({
+    id: r.id,
+    code: r.code ?? "",
+    name: r.name ?? "",
+    categoryId: r.category_id ?? "",
+    supplierId: r.supplier_id ?? undefined,
+    unit: r.unit ?? "kg",
+    minStock: Number(r.minimum_stock ?? 0),
+    purchasePrice: Number(r.purchase_price ?? 0),
+    barcode: r.barcode ?? "",
+    description: r.description ?? "",
+    active: r.active ?? true,
+    hasExpiry: r.has_expiry ?? false,
+    shelfLifeDays: r.shelf_life_days ?? undefined,
+    expiryWarningDays: r.expiry_warning_days ?? undefined,
+    // keep the raw current_stock alongside for currentStock()
+    ...(r.current_stock !== undefined ? { currentStock: Number(r.current_stock) } : {}),
+  }) as Item & { currentStock?: number };
 
 const itemToRow = (i: Partial<Item>) => {
   const row: Record<string, unknown> = {};
@@ -106,6 +152,9 @@ const itemToRow = (i: Partial<Item>) => {
   if (i.purchasePrice !== undefined) row.purchase_price = i.purchasePrice;
   if (i.minStock !== undefined) row.minimum_stock = i.minStock;
   if (i.active !== undefined) row.active = i.active;
+  if (i.hasExpiry !== undefined) row.has_expiry = i.hasExpiry;
+  if (i.shelfLifeDays !== undefined) row.shelf_life_days = i.shelfLifeDays || null;
+  if (i.expiryWarningDays !== undefined) row.expiry_warning_days = i.expiryWarningDays || null;
   return row;
 };
 
@@ -161,6 +210,7 @@ const rowToTxn = (r: any): StockTransaction => ({
   unitPrice: r.unit_price !== null && r.unit_price !== undefined ? Number(r.unit_price) : undefined,
   date: r.date,
   supplierId: r.supplier_id ?? undefined,
+  branchId: r.branch_id ?? undefined,
   refId: r.ref_id ?? undefined,
   remark: r.remark ?? undefined,
   expiryDate: r.expiry_date ?? undefined,
@@ -175,6 +225,7 @@ const txnToRow = (t: Partial<StockTransaction>) => {
   if (t.unitPrice !== undefined) row.unit_price = t.unitPrice;
   if (t.date !== undefined) row.date = t.date;
   if (t.supplierId !== undefined) row.supplier_id = t.supplierId || null;
+  if (t.branchId !== undefined) row.branch_id = t.branchId || null;
   if (t.refId !== undefined) row.ref_id = t.refId || null;
   if (t.remark !== undefined) row.remark = t.remark;
   if (t.expiryDate !== undefined) row.expiry_date = t.expiryDate;
@@ -190,27 +241,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       const raw = typeof window !== "undefined" ? window.localStorage.getItem(SETTINGS_KEY) : null;
       if (raw) settings = { ...defaultSettings, ...JSON.parse(raw) };
-    } catch {}
+    } catch {
+      // Ignore malformed cached settings and fall back to defaults.
+    }
     return { ...defaultData, settings };
   });
   const [loading, setLoading] = useState(true);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    const [items, categories, suppliers, branches, users, txns, purchases, purchaseItems] =
-      await Promise.all([
-        supabase.from("items").select("*").order("code"),
-        supabase.from("categories").select("*").order("name"),
-        supabase.from("suppliers").select("*").order("name"),
-        supabase.from("branches").select("*").order("name"),
-        supabase.from("users").select("*").order("name"),
-        supabase.from("transactions").select("*").order("date", { ascending: false }),
-        supabase.from("purchases").select("*").order("purchase_date", { ascending: false }),
-        supabase.from("purchase_items").select("*"),
-      ]);
+    const [
+      items,
+      categories,
+      suppliers,
+      branches,
+      users,
+      txns,
+      purchases,
+      purchaseItems,
+      inventoryBalance,
+    ] = await Promise.all([
+      supabase.from("items").select("*").order("code"),
+      supabase.from("categories").select("*").order("name"),
+      supabase.from("suppliers").select("*").order("name"),
+      supabase.from("branches").select("*").order("name"),
+      supabase.from("users").select("*").order("name"),
+      supabase.from("transactions").select("*").order("date", { ascending: false }),
+      supabase.from("purchases").select("*").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_items").select("*"),
+      supabase.from("inventory_balance").select("*"),
+    ]);
 
-    const err = [items, categories, suppliers, branches, users, txns, purchases, purchaseItems]
-      .find((r) => r.error);
+    const err = [
+      items,
+      categories,
+      suppliers,
+      branches,
+      users,
+      txns,
+      purchases,
+      purchaseItems,
+      inventoryBalance,
+    ].find((r) => r.error);
     if (err?.error) {
       console.error("Load error:", err.error);
     }
@@ -246,6 +318,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         total: Number(r.total ?? 0),
         branchId: r.branch_id ?? "",
         items: purchasesById.get(r.id) ?? [],
+      })),
+      inventoryBalance: (inventoryBalance.data ?? []).map((r: any) => ({
+        branchId: r.branch_id,
+        itemId: r.item_id,
+        quantity: Number(r.quantity ?? 0),
+        updatedAt: r.updated_at,
       })),
     }));
 
@@ -283,7 +361,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try {
       window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(data.settings));
-    } catch {}
+    } catch {
+      // Ignore write failures (e.g. private browsing / storage quota).
+    }
     if (typeof document !== "undefined") {
       if (data.settings.theme === "dark") document.documentElement.classList.add("dark");
       else document.documentElement.classList.remove("dark");
@@ -292,10 +372,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const currentStock = useCallback(
     (itemId: string) => {
-      const it = data.items.find((x) => x.id === itemId) as (Item & { currentStock?: number }) | undefined;
+      const it = data.items.find((x) => x.id === itemId) as
+        (Item & { currentStock?: number }) | undefined;
       return it?.currentStock ?? 0;
     },
-    [data.items]
+    [data.items],
   );
 
   const bumpItemStock = useCallback(
@@ -305,10 +386,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         items: d.items.map((it) =>
           it.id === itemId
             ? ({ ...it, currentStock: ((it as any).currentStock ?? 0) + delta } as Item)
-            : it
+            : it,
         ),
       })),
-    []
+    [],
   );
 
   const persistStock = async (itemId: string, delta: number) => {
@@ -486,6 +567,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           unit_price: it.unitPrice,
           date: p.purchaseDate,
           supplier_id: p.supplierId || null,
+          branch_id: p.branchId || null,
           ref_id: pRow.id,
           expiry_date: it.expiryDate,
           employee: p.employee,
@@ -499,10 +581,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setData((d) => ({
           ...d,
           purchases: [{ ...p, id: pRow.id }, ...d.purchases],
-          transactions: [
-            ...((newTxns ?? []).map(rowToTxn)),
-            ...d.transactions,
-          ],
+          transactions: [...(newTxns ?? []).map(rowToTxn), ...d.transactions],
           items: d.items.map((it) => {
             const line = p.items.find((l) => l.itemId === it.id);
             if (!line) return it;
@@ -554,17 +633,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!touchesBranding) return;
         const next = { ...data.settings, ...p };
         try {
-          await supabase
-            .from("company_settings")
-            .upsert({
-              id: "singleton",
-              company_name: next.companyName,
-              logo_url: next.logoUrl,
-              address: next.address,
-              phone: next.phone,
-              email: next.email,
-              updated_at: new Date().toISOString(),
-            });
+          await supabase.from("company_settings").upsert({
+            id: "singleton",
+            company_name: next.companyName,
+            logo_url: next.logoUrl,
+            address: next.address,
+            phone: next.phone,
+            email: next.email,
+            updated_at: new Date().toISOString(),
+          });
         } catch (e) {
           console.warn("Failed to persist branding", e);
         }
@@ -572,8 +649,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       reset: async () => {
         await loadAll();
       },
+      getAvailableLots: getAvailableLotsService,
+      consumeInventory: consumeInventoryService,
+      generateExpiryNotifications: generateExpiryNotificationsService,
+      listNotifications: listNotificationsService,
+      resolveNotification: resolveNotificationService,
+      dismissNotification: dismissNotificationService,
+      runNotificationScheduler: runNotificationSchedulerService,
     }),
-    [data, loading, currentStock, bumpItemStock, loadAll]
+    [data, loading, currentStock, bumpItemStock, loadAll],
   );
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
