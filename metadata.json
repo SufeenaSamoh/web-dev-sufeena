@@ -1,0 +1,6 @@
+{
+  "name": "Inventory & Stock Management System",
+  "description": "Comprehensive inventory management system with stock tracking, actual vs theoretical usage (BOM) variance reconciliation, stock count, purchase orders, suppliers, and analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
